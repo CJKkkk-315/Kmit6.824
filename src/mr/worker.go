@@ -35,6 +35,7 @@ func ihash(key string) int {
 
 // main/mrworker.go calls this function.
 func WorkerMap(mapf func(string, string) []KeyValue, TaskId uint64, FileName string, NReduce int) {
+	fmt.Println("处理map ", TaskId)
 
 	file, err := os.Open(FileName)
 	if err != nil {
@@ -91,6 +92,7 @@ func FinishMap(TempFiles []string, TaskId uint64) {
 }
 
 func WorkerReduce(reducef func(string, []string) string, TaskId uint64) {
+	fmt.Println("处理reduce ", TaskId)
 	assFiles, err := filepath.Glob(fmt.Sprintf("imf-mr-*-%v", TaskId))
 	if err != nil {
 		fmt.Println("ass file: ", err)

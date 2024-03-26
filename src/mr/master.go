@@ -12,11 +12,15 @@ import "net"
 import "net/rpc"
 import "net/http"
 
+type Task struct {
+	TaskId   uint64
+	TaskType string
+}
 type Master struct {
 	Files          []string
 	TaskIds        []uint64
 	TaskOverFlag   map[uint64]bool
-	UnImplement    chan uint64
+	UnImplement    chan Task
 	NReduce        int
 	FinishedNumber int
 	mu             sync.Mutex
@@ -33,18 +37,16 @@ type Master struct {
 func (m *Master) ApplyTask(args *ApplyTaskArgs, reply *ApplyTaskReply) error {
 	//m.mu.Lock()
 	//defer m.mu.Unlock()
-
-	taskId := <-m.UnImplement
-	if taskId == 0 {
+	taskEvent := <-m.UnImplement
+	if taskEvent.TaskType == "" {
 		reply.TaskType = "Over"
 		return nil
 	}
-	taskId--
-	reply.TaskId = taskId
+	reply.TaskId = taskEvent.TaskId
 
 	if !m.mapDone {
 		reply.TaskType = "Map"
-		reply.FileName = m.Files[taskId]
+		reply.FileName = m.Files[taskEvent.TaskId]
 		reply.NReduce = m.NReduce
 	} else {
 		reply.TaskType = "Reduce"
@@ -111,11 +113,16 @@ func (m *Master) MapFinishProcess() {
 	}
 	m.TaskIds = reduceIds
 	m.TaskOverFlag = make(map[uint64]bool)
-	m.UnImplement = make(chan uint64, m.NReduce)
+	//close(m.UnImplement)
+	//m.UnImplement = make(chan uint64, m.NReduce)
 	m.FinishedNumber = 0
 	m.mapDone = true
 	for _, reduceId := range reduceIds {
-		m.UnImplement <- reduceId + 1
+		taskEvent := Task{
+			TaskId:   reduceId,
+			TaskType: "Reduce",
+		}
+		m.UnImplement <- taskEvent
 	}
 
 }
@@ -149,7 +156,7 @@ func (m *Master) server() {
 // if the entire job has finished.
 func (m *Master) Done() bool {
 	ret := m.reduceDone
-
+	ret = false
 	return ret
 }
 func removeImf() {
@@ -194,7 +201,7 @@ func MakeMaster(files []string, nReduce int) *Master {
 		TaskIds:      make([]uint64, 0),
 		TaskOverFlag: make(map[uint64]bool),
 		Files:        make([]string, 0),
-		UnImplement:  make(chan uint64, len(files)),
+		UnImplement:  make(chan Task, 20),
 		NReduce:      nReduce,
 		mapDone:      false,
 		reduceDone:   false,
@@ -202,7 +209,11 @@ func MakeMaster(files []string, nReduce int) *Master {
 	for i, file := range files {
 		m.Files = append(m.Files, file)
 		m.TaskIds = append(m.TaskIds, uint64(i))
-		m.UnImplement <- uint64(i) + 1
+		taskEvent := Task{
+			TaskId:   uint64(i),
+			TaskType: "Map",
+		}
+		m.UnImplement <- taskEvent
 	}
 	// Your code here.
 
