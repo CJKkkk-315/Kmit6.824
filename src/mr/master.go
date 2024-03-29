@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 import "net"
 import "net/rpc"
@@ -34,6 +35,15 @@ type Master struct {
 // an example RPC handler.
 //
 // the RPC argument and reply types are defined in rpc.go.
+func (m *Master) OverTimeCheck(taskEvent Task, mapDone bool) {
+	time.Sleep(10 * time.Second)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.TaskOverFlag[taskEvent.TaskId] != true && mapDone == m.mapDone {
+		m.UnImplement <- taskEvent
+	}
+}
+
 func (m *Master) ApplyTask(args *ApplyTaskArgs, reply *ApplyTaskReply) error {
 	//m.mu.Lock()
 	//defer m.mu.Unlock()
@@ -51,6 +61,7 @@ func (m *Master) ApplyTask(args *ApplyTaskArgs, reply *ApplyTaskReply) error {
 	} else {
 		reply.TaskType = "Reduce"
 	}
+	go m.OverTimeCheck(taskEvent, m.mapDone)
 	return nil
 }
 
