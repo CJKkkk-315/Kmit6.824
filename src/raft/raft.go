@@ -187,6 +187,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	if args.Term < rf.term {
 		reply.Term = rf.term
+		DPrintf("1 -- %v号，收到%v的投票申请 结果为%v 原因为term不够新", rf.me, args.CandidateId, reply)
 		reply.VoteGranted = false
 		rf.persist()
 		rf.mu.Unlock()
@@ -199,22 +200,26 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if rf.votedFor == args.CandidateId || rf.votedFor == -1 {
 			if args.LastLogTerm > rf.logs[len(rf.logs)-1].Term {
 				rf.votedFor = args.CandidateId
+				DPrintf("1 -- %v号，收到%v的投票申请 结果为%v", rf.me, args.CandidateId, reply)
 				reply.VoteGranted = true
 			} else {
 				if args.LastLogTerm == rf.logs[len(rf.logs)-1].Term && args.LastLogIndex >= rf.logs[len(rf.logs)-1].LogIndex {
 					rf.votedFor = args.CandidateId
+					DPrintf("1 -- %v号，收到%v的投票申请 结果为%v", rf.me, args.CandidateId, reply)
 					reply.VoteGranted = true
 				} else {
+					DPrintf("1 -- %v号，收到%v的投票申请 结果为%v 原因为日志不够新", rf.me, args.CandidateId, reply)
+
 					reply.VoteGranted = false
 				}
 			}
 		} else {
+			DPrintf("1 -- %v号，收到%v的投票申请 结果为%v 原因为已投过票", rf.me, args.CandidateId, reply)
 			reply.VoteGranted = false
 		}
 		rf.persist()
 	}
 	reply.Term = rf.term
-	DPrintf("1 -- %v号，收到%v的投票申请 结果为%v", rf.me, args.CandidateId, reply)
 	rf.mu.Unlock()
 	if reply.VoteGranted {
 		rf.RequestVoteChan <- &RequestVoteSignal{}
@@ -238,18 +243,20 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		rf.mu.Unlock()
 	}
 
-	if reply.VoteGranted == true {
+	if reply.VoteGranted == true && rf.term == reply.Term {
 		rf.mu.Lock()
 		rf.voted++
 		rf.mu.Unlock()
 		if rf.voted >= (len(rf.peers)+1)/2 {
 			rf.mu.Lock()
-			rf.state = Leader
-			rf.nextIndex = make([]int, len(rf.peers))
-			for i := range rf.peers {
-				rf.nextIndex[i] = len(rf.logs)
+			if rf.state == Candidate {
+				rf.state = Leader
+				rf.nextIndex = make([]int, len(rf.peers))
+				for i := range rf.peers {
+					rf.nextIndex[i] = len(rf.logs)
+				}
+				rf.matchIndex = make([]int, len(rf.peers))
 			}
-			rf.matchIndex = make([]int, len(rf.peers))
 			rf.mu.Unlock()
 			rf.HeartBeatChan <- &AppendEntriesSignal{}
 		}
@@ -334,6 +341,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			rf.commitIndex = args.LeaderCommit
 		}
+		DPrintf(" Follower :%v CommitIndex 更新为: %v, 共提交%v条日志", rf.me, rf.commitIndex, rf.commitIndex-oldCommit)
 		for i := oldCommit + 1; i < rf.commitIndex+1; i++ {
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
@@ -342,7 +350,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 			DPrintf(" Follower %v 提交index: %v %v", rf.me, rf.logs[i].LogIndex, rf.logs[i].Term)
 		}
-		DPrintf(" Follower :%v CommitIndex 更新为: %v, 共提交%v条日志", rf.me, rf.commitIndex, rf.commitIndex-oldCommit)
 	}
 	return
 }
@@ -396,6 +403,7 @@ func (rf *Raft) checkCommit() {
 	//if maxCommit != rf.commitIndex {
 	//	DPrintf("[%d] updates its commit index from %d to %d", rf.me, rf.commitIndex, maxCommit)
 	//}
+	DPrintf(" Leader :%v CommitIndex 更新为: %v, 共提交%v条日志", rf.me, maxCommit, maxCommit-rf.commitIndex)
 	for i := rf.commitIndex + 1; i < maxCommit+1; i++ {
 		rf.applyCh <- ApplyMsg{
 			CommandValid: true,
@@ -404,7 +412,6 @@ func (rf *Raft) checkCommit() {
 		}
 		DPrintf(" Leader %v 提交index: %v %v", rf.me, rf.logs[i].LogIndex, rf.logs[i].Term)
 	}
-	DPrintf(" Leader :%v CommitIndex 更新为: %v, 共提交%v条日志", rf.me, maxCommit, maxCommit-rf.commitIndex)
 	rf.commitIndex = maxCommit
 
 }
@@ -426,15 +433,17 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	if !ok {
 		return
 	}
-	DPrintf("%v 收到%v转发command %v的结果 %v leader的logs：%v", rf.me, server, args, reply, rf.logs)
+	DPrintf("%v 收到对%v转发command %v的结果 %v leader的logs：%v", rf.me, server, args, reply, rf.logs)
 
-	if reply.Term > rf.term {
-		rf.mu.Lock()
-		rf.term = reply.Term
-		rf.votedFor = -1
-		rf.state = Follower
-		rf.persist()
-		rf.mu.Unlock()
+	if reply.Term > args.Term {
+		if reply.Term > rf.term {
+			rf.mu.Lock()
+			rf.term = reply.Term
+			rf.votedFor = -1
+			rf.state = Follower
+			rf.persist()
+			rf.mu.Unlock()
+		}
 		return
 	}
 
@@ -443,29 +452,40 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	rf.mu.Lock()
 	if success {
 		if len(args.Entries) != 0 {
-			//rf.nextIndex[server] = args.Entries[len(args.Entries)-1].LogIndex + 1
-			rf.nextIndex[server] = rf.logs[len(rf.logs)-1].LogIndex + 1
+			rf.nextIndex[server] = args.Entries[len(args.Entries)-1].LogIndex + 1
+			//rf.nextIndex[server] = rf.logs[len(rf.logs)-1].LogIndex + 1
 
 			if rf.matchIndex[server] < args.Entries[len(args.Entries)-1].LogIndex {
 				rf.matchIndex[server] = args.Entries[len(args.Entries)-1].LogIndex
 			}
 		}
 	} else {
-		existFlag := false
-		for i := len(rf.logs) - 1; i > 0; i-- {
-			if rf.logs[i].Term == reply.ConflictTerm {
-				rf.nextIndex[server] = i - 1
-				existFlag = true
-				break
-			}
-		}
-		if reply.ConflictTerm == 0 || !existFlag {
+		// 使用term和index的方案
+		//existFlag := false
+		//for i := len(rf.logs) - 1; i > 0; i-- {
+		//	if rf.logs[i].Term == reply.ConflictTerm {
+		//		rf.nextIndex[server] = i - 1
+		//		existFlag = true
+		//		break
+		//	}
+		//}
+		//if reply.ConflictTerm == 0 || !existFlag {
+		//	rf.nextIndex[server] = reply.ConflictIndex
+		//}
+		//DPrintf("leader %v 的nextIndex %v", rf.me, rf.nextIndex)
+		//if rf.nextIndex[server] < 1 {
+		//	rf.nextIndex[server] = 1
+		//}
+
+		// 仅仅使用index
+		if reply.ConflictIndex > 0 {
 			rf.nextIndex[server] = reply.ConflictIndex
-		}
-		DPrintf("leader %v 的nextIndex %v", rf.me, rf.nextIndex)
-		if rf.nextIndex[server] < 1 {
+		} else {
 			rf.nextIndex[server] = 1
 		}
+
+		DPrintf("leader %v 的nextIndex %v", rf.me, rf.nextIndex)
+
 	}
 	rf.mu.Unlock()
 
@@ -609,19 +629,19 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Unlock()
 	DPrintf("Start %v Success leader %v", log, rf.me)
 
-	for i := range rf.peers {
-		if i == rf.me {
-			continue
-		}
-
-		args := &AppendEntriesArgs{
-			Term:     rf.term,
-			LeaderId: rf.me,
-		}
-
-		reply := &AppendEntriesReply{}
-		go rf.sendAppendEntries(i, args, reply)
-	}
+	//for i := range rf.peers {
+	//	if i == rf.me {
+	//		continue
+	//	}
+	//
+	//	args := &AppendEntriesArgs{
+	//		Term:     rf.term,
+	//		LeaderId: rf.me,
+	//	}
+	//
+	//	reply := &AppendEntriesReply{}
+	//	go rf.sendAppendEntries(i, args, reply)
+	//}
 
 	// Your code here (2B).
 
