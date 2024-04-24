@@ -52,12 +52,16 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int
+	IsLeader     bool
 }
 
 type Log struct {
 	Command  interface{}
 	Term     int
 	LogIndex int
+}
+type StartSignal struct {
 }
 
 // A Go object implementing a single Raft peer.
@@ -75,6 +79,7 @@ type Raft struct {
 	votedFor        int
 	HeartBeatChan   chan *AppendEntriesSignal
 	RequestVoteChan chan *RequestVoteSignal
+	StartChan       chan *StartSignal
 
 	logs        []Log
 	commitIndex int
@@ -87,6 +92,10 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+}
+
+func (rf *Raft) IsLeader() bool {
+	return rf.state == Leader
 }
 
 // return currentTerm and whether this server
@@ -187,8 +196,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	if args.Term < rf.term {
 		reply.Term = rf.term
-		DPrintf("1 -- %v号，收到%v的投票申请 结果为%v 原因为term不够新", rf.me, args.CandidateId, reply)
 		reply.VoteGranted = false
+		DPrintf("1 -- %v号，收到%v的投票申请 结果为%v 原因为term不够新", rf.me, args.CandidateId, reply)
+
 		rf.persist()
 		rf.mu.Unlock()
 		return
@@ -200,22 +210,25 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if rf.votedFor == args.CandidateId || rf.votedFor == -1 {
 			if args.LastLogTerm > rf.logs[len(rf.logs)-1].Term {
 				rf.votedFor = args.CandidateId
-				DPrintf("1 -- %v号，收到%v的投票申请 结果为%v", rf.me, args.CandidateId, reply)
 				reply.VoteGranted = true
+				DPrintf("1 -- %v号，收到%v的投票申请 结果为%v", rf.me, args.CandidateId, reply)
+
 			} else {
 				if args.LastLogTerm == rf.logs[len(rf.logs)-1].Term && args.LastLogIndex >= rf.logs[len(rf.logs)-1].LogIndex {
 					rf.votedFor = args.CandidateId
-					DPrintf("1 -- %v号，收到%v的投票申请 结果为%v", rf.me, args.CandidateId, reply)
 					reply.VoteGranted = true
+					DPrintf("1 -- %v号，收到%v的投票申请 结果为%v", rf.me, args.CandidateId, reply)
+
 				} else {
+					reply.VoteGranted = false
 					DPrintf("1 -- %v号，收到%v的投票申请 结果为%v 原因为日志不够新", rf.me, args.CandidateId, reply)
 
-					reply.VoteGranted = false
 				}
 			}
 		} else {
-			DPrintf("1 -- %v号，收到%v的投票申请 结果为%v 原因为已投过票", rf.me, args.CandidateId, reply)
 			reply.VoteGranted = false
+			DPrintf("1 -- %v号，收到%v的投票申请 结果为%v 原因为已投过票", rf.me, args.CandidateId, reply)
+
 		}
 		rf.persist()
 	}
@@ -347,6 +360,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				CommandValid: true,
 				Command:      rf.logs[i].Command,
 				CommandIndex: rf.logs[i].LogIndex,
+				CommandTerm:  rf.logs[i].Term,
+				IsLeader:     false,
 			}
 			DPrintf(" Follower %v 提交index: %v %v", rf.me, rf.logs[i].LogIndex, rf.logs[i].Term)
 		}
@@ -409,6 +424,8 @@ func (rf *Raft) checkCommit() {
 			CommandValid: true,
 			Command:      rf.logs[i].Command,
 			CommandIndex: rf.logs[i].LogIndex,
+			CommandTerm:  rf.logs[i].Term,
+			IsLeader:     true,
 		}
 		DPrintf(" Leader %v 提交index: %v %v", rf.me, rf.logs[i].LogIndex, rf.logs[i].Term)
 	}
@@ -572,6 +589,7 @@ func (rf *Raft) HeartBeatKeep() {
 			}
 		} else {
 			DPrintf("%v进入领导者模式 term:%v ", rf.me, rf.term)
+
 			rf.checkCommit()
 
 			for i := range rf.peers {
@@ -589,6 +607,14 @@ func (rf *Raft) HeartBeatKeep() {
 				reply := &AppendEntriesReply{}
 				go rf.sendAppendEntries(i, args, reply)
 			}
+
+			//select {
+			//case <- time.After(50 * time.Millisecond):
+			//	break
+			//case <- rf.StartChan:
+			//	break
+			//}
+
 			time.Sleep(50 * time.Millisecond)
 		}
 
@@ -626,23 +652,27 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	rf.logs = append(rf.logs, log)
 	rf.persist()
+	//rf.StartChan <- &StartSignal{}
 	rf.mu.Unlock()
 	DPrintf("Start %v Success leader %v", log, rf.me)
 
-	//for i := range rf.peers {
-	//	if i == rf.me {
-	//		continue
-	//	}
-	//
-	//	args := &AppendEntriesArgs{
-	//		Term:     rf.term,
-	//		LeaderId: rf.me,
-	//	}
-	//
-	//	reply := &AppendEntriesReply{}
-	//	go rf.sendAppendEntries(i, args, reply)
-	//}
+	rf.checkCommit()
 
+	for i := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+		args := &AppendEntriesArgs{
+			Term:         rf.term,
+			LeaderId:     rf.me,
+			PrevLogIndex: rf.nextIndex[i] - 1,
+			PrevLogTerm:  rf.logs[rf.nextIndex[i]-1].Term,
+			Entries:      []Log{},
+			LeaderCommit: rf.commitIndex,
+		}
+		reply := &AppendEntriesReply{}
+		go rf.sendAppendEntries(i, args, reply)
+	}
 	// Your code here (2B).
 
 	return index, term, true
@@ -698,6 +728,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}}
 	rf.HeartBeatChan = make(chan *AppendEntriesSignal)
 	rf.RequestVoteChan = make(chan *RequestVoteSignal)
+	rf.StartChan = make(chan *StartSignal)
 	rf.state = Follower
 
 	// Your initialization code here (2A, 2B, 2C).

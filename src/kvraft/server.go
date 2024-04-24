@@ -7,9 +7,10 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -17,12 +18,30 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	}
 	return
 }
+const HandleTimeOut = 1000
 
+const (
+	PutType = "Put"
+	AppendType = "Append"
+	GetType = "Get"
+)
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	SeqId int
+	OpType string
+	OpKey string
+	OpValue string
 }
+
+type TaskInfo struct {
+	Index int
+	Term  int
+}
+
+type TaskRes struct {
+	Msg raft.ApplyMsg
+	Success  bool
+}
+
 
 type KVServer struct {
 	mu      sync.Mutex
@@ -30,18 +49,167 @@ type KVServer struct {
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
 	dead    int32 // set by Kill()
+	taskMap map[TaskInfo] chan TaskRes
+	historyFlag map[int] interface{}
+	db		map[string] string
 
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
 }
+func (kv *KVServer) HandleApply() {
+	for msg := range kv.applyCh {
+		DPrintf("服务器端 %v HandleApply 收到 %v", kv.me, msg)
+		info := TaskInfo{
+			Index: msg.CommandIndex,
+			Term: msg.CommandTerm,
+		}
+		if !msg.IsLeader
+		kv.mu.Lock()
+		ch := kv.taskMap[info]
+		kv.mu.Unlock()
+
+		ch <- TaskRes{
+			Msg:     msg,
+			Success: true,
+		}
+	}
+}
+func (kv *KVServer) DBGet(key string) (string, bool) {
+	value, ok := kv.db[key]
+	return value, ok
+}
+
+func (kv *KVServer) DBPut(key, value string) {
+	kv.db[key] = value
+}
+
+func (kv *KVServer) DBAppend(key, value string) {
+	if old, ok := kv.db[key]; ok == true {
+		kv.db[key] = old + value
+	} else {
+		kv.db[key] = value
+	}
+}
+
+
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	DPrintf("服务端%v收到Get请求 %v", kv.me, args)
+
+	op := Op{
+		SeqId:   args.SeqId,
+		OpType:  GetType,
+		OpKey:   args.Key,
+		OpValue: "",
+	}
+
+	startIndex, startTerm, isLeader :=  kv.rf.Start(op)
+	info := TaskInfo{
+		Index: startIndex,
+		Term:  startTerm,
+	}
+	ch := make(chan TaskRes)
+
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	} else {
+		kv.mu.Lock()
+		kv.taskMap[info] = ch
+		kv.mu.Unlock()
+	}
+
+	defer func() {
+		kv.mu.Lock()
+		delete(kv.taskMap, info)
+		kv.mu.Unlock()
+	}()
+
+	select {
+	case <- time.After(HandleTimeOut * time.Millisecond):
+		reply.Value = ""
+		reply.Err = ErrTimeOut
+	case res := <- ch:
+		if old, ok := kv.historyFlag[res.Msg.CommandIndex]; ok == true {
+			reply.Value = old.(GetReply).Value
+			reply.Err = old.(GetReply).Err
+		} else {
+			kv.mu.Lock()
+			value, ok := kv.DBGet(args.Key)
+			if ok {
+				reply.Err = OK
+				reply.Value = value
+				kv.historyFlag[res.Msg.CommandIndex] = GetReply{
+					Err:   OK,
+					Value: value,
+				}
+			} else {
+				reply.Err = ErrNoKey
+				reply.Value = ""
+				kv.historyFlag[res.Msg.CommandIndex] = GetReply{
+					Err:   ErrNoKey,
+					Value: "",
+				}
+			}
+			kv.mu.Unlock()
+		}
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+
+
+	op := Op{
+		SeqId:   args.SeqId,
+		OpType:  args.Op,
+		OpKey:   args.Key,
+		OpValue: args.Value,
+	}
+
+	startIndex, startTerm, isLeader :=  kv.rf.Start(op)
+	info := TaskInfo{
+		Index: startIndex,
+		Term:  startTerm,
+	}
+	ch := make(chan TaskRes)
+
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	} else {
+		kv.mu.Lock()
+		kv.taskMap[info] = ch
+		kv.mu.Unlock()
+	}
+	defer func() {
+		kv.mu.Lock()
+		delete(kv.taskMap, info)
+		kv.mu.Unlock()
+	}()
+	DPrintf("服务端%v收到%v请求 %v %v 开始请求", kv.me, args.Op, args.Key, args.Value)
+
+	select {
+	case <- time.After(HandleTimeOut * time.Millisecond):
+		reply.Err = ErrTimeOut
+	case res := <- ch:
+		if old, ok := kv.historyFlag[res.Msg.CommandIndex]; ok == true {
+			reply.Err = old.(PutAppendReply).Err
+		} else {
+			kv.mu.Lock()
+			op = res.Msg.Command.(Op)
+			if op.OpType == PutType {
+				kv.DBPut(op.OpKey, op.OpValue)
+			}
+
+			if op.OpType == AppendType {
+				kv.DBAppend(op.OpKey, op.OpValue)
+			}
+			reply.Err = OK
+			kv.historyFlag[res.Msg.CommandIndex] = PutAppendReply{Err:OK}
+			kv.mu.Unlock()
+		}
+	}
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -89,6 +257,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
+	kv.taskMap = make(map[TaskInfo] chan TaskRes)
+	kv.historyFlag = make(map[int] interface{})
+	kv.db = make(map[string] string)
+
+	go kv.HandleApply()
 	// You may need initialization code here.
 
 	return kv
