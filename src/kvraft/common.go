@@ -14,8 +14,8 @@ type PutAppendArgs struct {
 	Key      string
 	Value    string
 	Op       string // "Put" or "Append"
-	ClientId int
-	SeqId    int
+	ClientId int64
+	SeqId    int32
 
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
@@ -28,8 +28,8 @@ type PutAppendReply struct {
 
 type GetArgs struct {
 	Key      string
-	ClientId int
-	SeqId    int
+	ClientId int64
+	SeqId    int32
 	// You'll have to add definitions here.
 }
 

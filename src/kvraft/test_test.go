@@ -439,7 +439,6 @@ func GenericTestLinearizability(t *testing.T, part string, nclients int, nserver
 			}
 		}
 		t.Fatal("history is not linearizable")
-		t.Fatal("history is not linearizable")
 	} else if res == porcupine.Unknown {
 		fmt.Println("info: linearizability check timed out, assuming history is ok")
 	}
